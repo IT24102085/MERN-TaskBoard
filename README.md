@@ -110,7 +110,9 @@ AUTH_LOCKOUT_MS=900000
 AUTH_LOCKOUT_FAILURES=5
 ```
 
-For production, set `MONGODB_URI` and `JWT_SECRET` through the hosting provider's secret manager. Set `FRONTEND_ORIGIN` to the exact deployed frontend origin, such as `https://taskboard.example.com`. Multiple trusted origins may be comma-separated. Do not use `*` for authenticated browser requests.
+For production, set `MONGODB_URI` and `JWT_SECRET` through the hosting provider's secret manager. Both `mongodb://` and `mongodb+srv://` connection strings are supported. On Railway, use the MongoDB service's connection variable (for example, `${{MongoDB.MONGO_URL}}`) as the value of `MONGODB_URI`; do not copy credentials into source code. Set `FRONTEND_ORIGIN` to the exact deployed frontend origin, such as `https://taskboard.example.com`. Multiple trusted origins may be comma-separated. Do not use `*` for authenticated browser requests.
+
+The backend readiness endpoint is `GET /health`. It returns HTTP 200 only after MongoDB is connected, and HTTP 503 while the service is not ready.
 
 Never commit real `.env` files, database credentials, JWT secrets, tokens, or private keys. `server/.env.example` contains placeholders only.
 
@@ -133,6 +135,8 @@ npm run dev
 ```
 
 Open `http://localhost:5173` in a browser.
+
+For the Vite frontend, set `VITE_API_URL` to the backend API base URL. Locally use `http://localhost:5000/api`; in production use the deployed backend URL with `/api` appended.
 
 For a production-style frontend build:
 

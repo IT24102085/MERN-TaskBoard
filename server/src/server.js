@@ -5,11 +5,15 @@ const rateLimit = require('express-rate-limit');
 const mongoose = require('mongoose');
 const path = require('path');
 
-const envResult = require('dotenv').config({
+const dotenv = require('dotenv');
+const localEnvResult = dotenv.config({
+  path: path.resolve(__dirname, '../.env.local')
+});
+const envResult = dotenv.config({
   path: path.resolve(__dirname, '../.env')
 });
 
-if (envResult.error && envResult.error.code !== 'ENOENT') {
+if ((localEnvResult.error && localEnvResult.error.code !== 'ENOENT') || (envResult.error && envResult.error.code !== 'ENOENT')) {
   console.error('Unable to load server environment configuration');
   process.exit(1);
 }
@@ -30,8 +34,20 @@ function getMongoUri() {
     throw new Error('MONGODB_URI is not a valid MongoDB connection string');
   }
 
+  if (uri.protocol === 'mongodb:') {
+    if (!uri.hostname) {
+      throw new Error('MONGODB_URI must include a MongoDB hostname');
+    }
+
+    if (!uri.pathname || uri.pathname === '/') {
+      uri.pathname = '/taskboard';
+    }
+
+    return uri.toString();
+  }
+
   if (uri.protocol !== 'mongodb+srv:') {
-    throw new Error('MONGODB_URI must use the mongodb+srv:// format for MongoDB Atlas');
+    throw new Error('MONGODB_URI must use mongodb:// for local MongoDB or mongodb+srv:// for MongoDB Atlas');
   }
 
   if (!uri.hostname || !uri.hostname.endsWith('.mongodb.net')) {
@@ -71,6 +87,8 @@ const analyticsRoutes = require('./routes/analyticsRoutes.js');
 const userRoutes = require('./routes/userRoutes.js');
 
 const app = express();
+let httpServer;
+let isReady = false;
 const allowedOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173')
   .split(',')
   .map(origin => origin.trim())
@@ -104,6 +122,24 @@ app.use(cors({
   }
 }));
 app.use(express.json({ limit: '100kb' }));
+
+// Railway and other deployment platforms use this endpoint to determine readiness.
+// The API is only ready after MongoDB has connected successfully.
+app.get('/health', (req, res) => {
+  const databaseReady = mongoose.connection.readyState === 1;
+
+  if (!isReady || !databaseReady) {
+    return res.status(503).json({
+      status: 'not_ready',
+      database: 'disconnected'
+    });
+  }
+
+  return res.status(200).json({
+    status: 'ok',
+    database: 'connected'
+  });
+});
 
 // API Routes
 app.use('/api/auth', authRateLimiter, authRoutes);
@@ -148,37 +184,61 @@ function getMongoConnectionFailureMessage(error) {
   }
 
   if (error?.name === 'MongoParseError' || /invalid scheme|uri malformed|must be a string/.test(message)) {
-    return 'MongoDB connection configuration is invalid. Use the mongodb+srv:// Atlas format with a database name and URL-encoded username/password.';
+    return 'MongoDB connection configuration is invalid. Use a mongodb:// or mongodb+srv:// connection string with a database name.';
   }
 
   if (/querysrv|enotfound|dns|srv record/.test(message)) {
-    return 'MongoDB Atlas hostname could not be resolved. Verify the cluster hostname from Atlas and local DNS/network access.';
+    return 'MongoDB hostname could not be resolved. Verify the database hostname and Railway network access.';
   }
 
   if (/timed out|timeout|server selection/.test(message)) {
-    return 'MongoDB Atlas connection timed out. Verify that the cluster is active and the current client IP is allowed in Atlas Network Access.';
+    return 'MongoDB connection timed out. Verify that the database service is running and reachable from Railway.';
   }
 
   if (/econnrefused|econnreset|network/.test(message)) {
-    return 'MongoDB Atlas network connection failed. Verify the cluster is active and the current client IP is allowed in Atlas Network Access.';
+    return 'MongoDB network connection failed. Verify the database service and Railway network configuration.';
   }
 
-  return 'MongoDB connection failed. Verify the Atlas cluster status, database user permissions, network access, and local environment configuration.';
+  return 'MongoDB connection failed. Verify the database service status, credentials, network access, and environment configuration.';
 }
 
 // Start server
 async function startServer() {
+  httpServer = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server listening on port ${PORT}`);
+  });
+
+  httpServer.on('error', () => {
+    console.error(`Server failed to listen on port ${PORT}`);
+    process.exit(1);
+  });
+
   try {
     await mongoose.connect(mongoUri);
+    isReady = true;
     console.log('MongoDB connected successfully');
-
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-    });
   } catch (error) {
+    isReady = false;
     console.error('MongoDB connection failed:', getMongoConnectionFailureMessage(error));
-    process.exit(1);
+    httpServer.close(() => process.exit(1));
   }
 }
+
+async function shutdown(signal) {
+  isReady = false;
+
+  try {
+    await mongoose.disconnect();
+  } finally {
+    if (httpServer) {
+      httpServer.close(() => process.exit(0));
+    } else {
+      process.exit(0);
+    }
+  }
+}
+
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
 
 startServer();
